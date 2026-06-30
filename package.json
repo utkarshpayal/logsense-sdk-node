@@ -1,0 +1,26 @@
+{
+  "name": "@utkarshpayal/logsense-node",
+  "version": "1.0.0",
+  "description": "Official LogSense SDK for Node.js",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.18.1",
+    "express": "^5.2.1",
+    "uuid": "^14.0.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.0.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.8.3"
+  }
+}
