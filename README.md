@@ -1,180 +1,169 @@
-# LogSense Node.js SDK
+# 📦 LogSense Node.js SDK
 
-The official Node.js SDK for the **LogSense** observability platform. Designed for high performance, low overhead, and asynchronous bulk log shipping with automatic backoff and retry, request-scoped log context, and Express.js middleware integration.
-
----
-
-## Features
-
-- **🚀 High Performance:** Asynchronously batches and flushes logs to minimize network overhead and avoid blocking the main event loop.
-- **🛡️ Resilience & Retries:** Handles network dropouts gracefully with exponential backoff and retry mechanisms.
-- **⚡ Express.js Middleware:** Out-of-the-box middlewares for logging requests, tracking latencies, redacting sensitive parameters, and tracking uncaught Express controller exceptions.
-- **👶 Contextual Child Loggers:** Create loggers with bound metadata (e.g., specific to a user session or service component) that gets appended to every log entry automatically.
-- **🔒 Sensitive Data Redaction:** Automatically redacts fields containing sensitive information (e.g., `password`, `token`, `secret`, `card`, `cookie`, `authorization`) from logs.
-- **📈 Self-Monitoring Metrics:** Call `.getMetrics()` at any time to inspect queue sizes, transport status, and retries.
-- **💥 Uncaught Exception Handling:** Capture uncaught errors or unhandled promise rejections globally and flush them before the application terminates.
+Official Node.js SDK for **LogSense**—an AI-powered observability and log analysis platform. This SDK provides auto-instrumentation middleware for Express applications, captures exceptions, redacts sensitive PII locally, and buffers logs in memory to transmit them asynchronously without impacting your application's request latency.
 
 ---
 
-## Installation
+## ✨ Features
 
-Install the package via npm:
+- **Auto-Instrumentation**: Plug-and-play Express middleware that automatically tracks route hits, request/response headers, body payloads, status codes, query strings, and response latency.
+- **PII Redaction**: Automatically identifies and redacts sensitive keys (e.g. `password`, `token`, `secret`, `card`, `cookie`, `authorization`, `x-api-key`) in request bodies, queries, and headers before transmitting logs.
+- **Context Preservation & Tracing**: Generates or propagates `trace_id` and `request_id` across request execution boundaries.
+- **Request-Scoped Logging**: Attaches a contextual child logger (`req.log`) to incoming requests so all manual logs are automatically bound to the request's `trace_id`.
+- **Asynchronous Batching**: Enqueues logs into a local memory buffer and flushes them in batches to the ingestion API to minimize network overhead and avoid blocking the event loop.
+- **Resilient Transport**: Retries failed batch transmissions with exponential backoff if the ingestion endpoint is temporarily unreachable.
+- **Graceful Shutdown**: Automatically registers handlers for standard termination signals (`SIGINT`, `SIGTERM`, `beforeExit`) to flush outstanding logs before exiting.
+
+---
+
+## 🚀 Installation
 
 ```bash
 npm install @utkarshpayal/logsense-node
 ```
 
-Or via yarn:
-
-```bash
-yarn add @utkarshpayal/logsense-node
-```
-
 ---
 
-## Quick Start
+## 🛠️ Quick Start
 
-### 1. Basic Initialization & Logging
+### 1. Express Application Middleware Integration
 
-Configure and instantiate the logger in your application:
-
-```typescript
-import { LogSense } from "@utkarshpayal/logsense-node";
-
-const logger = new LogSense({
-  apiKey: "your-logsense-api-key",
-  service: "payment-service",
-  environment: "production",
-  batchSize: 50,                // Flush automatically after 50 logs...
-  flushInterval: 5000,          // ...or every 5 seconds (whichever comes first)
-});
-
-// Logging at different levels
-logger.info("Application started");
-logger.debug("Database query took 12ms", { queryTime: 12 });
-logger.warn("High memory utilization detected", { memoryUsage: "82%" });
-logger.error("Failed to query payment API");
-```
-
-### 2. Context & Child Loggers
-
-You can set global context metadata to be included in every log, or create child loggers to bound component/request-level context:
-
-```typescript
-// Set global context for all future logs
-logger.setContext({
-  version: "2.1.0",
-  region: "us-west-2",
-});
-
-// Create a child logger for a specific component
-const checkoutLogger = logger.child({ component: "CheckoutWorkflow" });
-
-// This log will automatically contain global context (version, region) AND child context (component)
-checkoutLogger.info("Customer initialized checkout", { cartId: "cart_8829" });
-```
-
-### 3. Capture Exceptions
-
-Capture and log caught exceptions easily:
-
-```typescript
-try {
-  throw new Error("Connection timed out to third-party provider");
-} catch (error) {
-  logger.captureException(error, { provider: "Stripe" });
-}
-```
-
----
-
-## Express.js Integration
-
-LogSense provides out-of-the-box middlewares for request tracing and error logging in Express applications.
+To instrument your entire Express server, register the `logsenseMiddleware` at the top of your middleware stack, and the `logsenseErrorMiddleware` at the very bottom.
 
 ```typescript
 import express from "express";
 import { LogSense, logsenseMiddleware, logsenseErrorMiddleware } from "@utkarshpayal/logsense-node";
 
 const app = express();
+
+// 1. Initialize LogSense SDK
 const logger = new LogSense({
-  apiKey: "your-logsense-api-key",
-  service: "web-gateway"
+    apiKey: "ls_live_your_api_key_here",
+    service: "auth-service",
+    environment: "production",
 });
 
-// Register request logging middleware (adds unique request ID & child logger)
-app.use(logsenseMiddleware(logger));
-
-// Body parsing
+// 2. Parse request bodies BEFORE registering LogSense middleware
 app.use(express.json());
 
+// 3. Register auto-instrumentation middleware
+app.use(logsenseMiddleware(logger));
+
+// 4. Define your application routes
 app.get("/api/users/:id", (req, res) => {
-  // Use the request-scoped child logger! 
-  // It automatically links logs with the generated x-request-id
-  req.log?.info("Fetching user profile data", { targetUserId: req.params.id });
-  
-  res.json({ id: req.params.id, name: "John Doe" });
+    // Write request-scoped logs tied automatically to the request's Trace ID
+    req.log.info("Fetching user profile details", { userId: req.params.id });
+    res.json({ id: req.params.id, name: "Alice" });
 });
 
-// Register error handling middleware (must be registered AFTER all routes)
+app.post("/api/checkout", (req, res) => {
+    if (!req.body.paymentMethod) {
+        throw new Error("Missing payment credentials");
+    }
+    res.json({ success: true });
+});
+
+// 5. Register the error logging middleware AFTER all routes, but BEFORE other error handlers
 app.use(logsenseErrorMiddleware(logger));
 
+// 6. Custom error fallback
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    res.status(500).json({ error: err.message });
+});
+
 app.listen(3000, () => {
-  console.log("Server listening on port 3000");
+    console.log("Server listening on port 3000");
 });
 ```
 
 ---
 
-## Configuration Options
+## ⚙️ Configuration Options
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `apiKey` | `string` | `""` | **Required.** Your LogSense project write key. |
-| `endpoint` | `string` | `"http://localhost:5000/logs"` | LogSense ingestion endpoint. |
-| `batchSize` | `number` | `100` | Number of logs to batch before sending to the backend. |
-| `flushInterval` | `number` | `5000` | How often (in milliseconds) to flush queued logs. |
-| `service` | `string` | `""` | Name of the service producing logs (e.g. `auth-api`). |
-| `environment` | `string` | `""` | Target environment (e.g. `production`, `staging`, `development`). |
-| `maxQueueSize` | `number` | `10000` | Maximum number of logs allowed in memory before dropping new logs. |
-| `compress` | `boolean` | `false` | Enable/disable GZIP compression on log payloads. |
-| `timeout` | `number` | `5000` | Network request timeout (in milliseconds). |
-| `customHeaders` | `Record<string, string>` | `{}` | Custom HTTP headers to include in ingestion requests. |
-| `captureUnhandled` | `boolean` | `false` | Set to `true` to register handlers for uncaught exceptions and rejections. |
-| `silent` | `boolean` | `false` | Set to `true` to disable internal stdout logging (console outputs). |
-
----
-
-## Graceful Shutdown
-
-To prevent losing logs in queue when your server is restarting or shutting down, trigger a graceful shutdown:
+Instantiate the logger by passing a configuration object to `LogSense`:
 
 ```typescript
-// Flush all remaining logs and clean up workers/intervals
-await logger.shutdown();
-process.exit(0);
+const logger = new LogSense(options: LoggerOptions);
 ```
 
+### `LoggerOptions` Specifications
+
+| Property | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **`apiKey`** (Required) | `string` | — | Access key generated from the LogSense Web Dashboard. |
+| **`service`** | `string` | `"node-service"` | Name of the microservice (e.g. `auth-service`, `payment-gateway`). |
+| **`environment`** | `string` | `"development"` | Application environment scope (e.g. `development`, `staging`, `production`). |
+| **`endpoint`** | `string` | `"http://localhost:5000/api/logs"` | Target URL of the LogSense server ingestion API endpoint. |
+| **`batchSize`** | `number` | `50` | Maximum number of log lines bundled together into a single HTTP post batch. |
+| **`flushInterval`** | `number` | `2000` | Buffer flush frequency in milliseconds. |
+| **`maxQueueSize`** | `number` | `10000` | Maximum capacity of the local log queue before dropping new items. |
+| **`compress`** | `boolean` | `false` | Whether to compress payload data before transport. |
+| **`timeout`** | `number` | `5000` | Network request timeout for sending logs. |
+| **`silent`** | `boolean` | `false` | If set to `true`, disables console mirroring of logs. |
+| **`captureUnhandled`** | `boolean` | `true` | When `true`, automatically logs uncaught exceptions and unhandled promise rejections. |
+
 ---
 
-## Self-Monitoring Metrics
+## 📖 API Documentation
 
-LogSense provides built-in metrics so you can track logging pipeline health in production:
+### Logger Methods
+
+You can call standard logging methods globally on your `LogSense` instance:
 
 ```typescript
-console.log(logger.getMetrics());
-/*
-Output format:
-{
-  queue: { size: 0, totalEnqueued: 1240, totalDropped: 0 },
-  transport: { activeRequests: 0, totalSuccess: 42, totalFailed: 0 },
-  retry: { pendingRetries: 0, totalRetriesTriggered: 0 }
+// Logging levels
+logger.trace(message: string, metadata?: Record<string, unknown>);
+logger.debug(message: string, metadata?: Record<string, unknown>);
+logger.info(message: string, metadata?: Record<string, unknown>);
+logger.warn(message: string, metadata?: Record<string, unknown>);
+logger.error(message: string, metadata?: Record<string, unknown>);
+logger.fatal(message: string, metadata?: Record<string, unknown>);
+```
+
+### Capturing Exceptions
+
+Manually log error stack traces and exceptions:
+
+```typescript
+try {
+    throw new Error("Database query connection failed");
+} catch (error) {
+    logger.captureException(error, { query: "SELECT * FROM users;" });
 }
-*/
+```
+
+### Context and Child Loggers
+
+You can create a sub-logger inheriting current settings and adding scoped context variables:
+
+```typescript
+// Set global static fields for the logger instance
+logger.setContext({ region: "us-east-1", release: "v1.2.0" });
+
+// Create a child logger for a specific workflow
+const taskLogger = logger.child({ taskId: "job_94101" });
+taskLogger.info("Starting batch task execution"); // Meta automatically contains taskId, region, and release.
+```
+
+### Request-Scoped Logging in Express
+
+When using `logsenseMiddleware`, a specialized child logger is attached to the request object:
+
+```typescript
+app.get("/orders", (req, res) => {
+    req.log.info("User requested orders catalog list"); 
+    // Console Output:
+    // [LogSense] [2026-06-30T15:00:00Z] [INFO] User requested orders catalog list {"requestId":"...","traceId":"...","method":"GET","url":"/orders"}
+});
 ```
 
 ---
 
-## License
+## 🛡️ Graceful Shutdown
 
-ISC License. Copyright (c) 2026.
+To prevent log loss when a service restarts or terminates, the SDK automatically registers handlers to flush buffers. If you need to manually handle exit routines, you can call `.shutdown()`:
+
+```typescript
+// Flush any queued logs and close transport channels
+await logger.shutdown();
+```
