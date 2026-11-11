@@ -1,18 +1,20 @@
 # 📦 LogSense Node.js SDK
 
-Official Node.js SDK for **LogSense**—an AI-powered observability and log analysis platform. This SDK provides auto-instrumentation middleware for Express applications, captures exceptions, redacts sensitive PII locally, and buffers logs in memory to transmit them asynchronously without impacting your application's request latency.
+Official Node.js SDK for **LogSense**—an AI-powered observability and log analysis platform. This SDK provides auto-instrumentation middleware for Express applications, captures exceptions, redacts sensitive fields locally, and buffers logs in memory to transmit them asynchronously without impacting your application's request latency.
 
 ---
 
 ## ✨ Features
 
 - **Auto-Instrumentation**: Plug-and-play Express middleware that automatically tracks route hits, request/response headers, body payloads, status codes, query strings, and response latency.
-- **PII Redaction**: Automatically identifies and redacts sensitive keys (e.g. `password`, `token`, `secret`, `card`, `cookie`, `authorization`, `x-api-key`) in request bodies, queries, and headers before transmitting logs.
-- **Context Preservation & Tracing**: Generates or propagates `trace_id` and `request_id` across request execution boundaries.
-- **Request-Scoped Logging**: Attaches a contextual child logger (`req.log`) to incoming requests so all manual logs are automatically bound to the request's `trace_id`.
+- **Sensitive-field Redaction**: Replaces values whose key contains `password`, `token`, `secret`, `card`, `authorization`, `cookie`, `x-api-key` or `key` with `[REDACTED]` in request bodies, query strings, request/response headers and response bodies before transmitting logs. String response bodies longer than 1000 characters are truncated.
+- **Request IDs**: Reuses an incoming `x-request-id` header or generates a UUID, sets it on `req.id` and echoes it back in the `x-request-id` response header. (Log entries have a `traceId` field, but the middleware does not populate it yet.)
+- **Request-Scoped Logging**: Attaches a contextual child logger (`req.log`) to incoming requests so all manual logs automatically carry the request's `requestId`, method and path.
 - **Asynchronous Batching**: Enqueues logs into a local memory buffer and flushes them in batches to the ingestion API to minimize network overhead and avoid blocking the event loop.
 - **Resilient Transport**: Retries failed batch transmissions with exponential backoff if the ingestion endpoint is temporarily unreachable.
-- **Graceful Shutdown**: Automatically registers handlers for standard termination signals (`SIGINT`, `SIGTERM`, `beforeExit`) to flush outstanding logs before exiting.
+- **Graceful Shutdown**: Automatically registers handlers for `SIGINT`, `SIGTERM` and `beforeExit` to flush outstanding logs before exiting.
+- **Optional gzip Compression**: With `compress: true`, batches are gzip-compressed and sent with `Content-Encoding: gzip` (supported by `logsense-server`).
+- **Metrics**: `logger.getMetrics()` reports queue, transport and retry statistics.
 
 ---
 
@@ -38,7 +40,8 @@ const app = express();
 
 // 1. Initialize LogSense SDK
 const logger = new LogSense({
-    apiKey: "ls_live_your_api_key_here",
+    apiKey: process.env.LOGSENSE_API_KEY!, // your project API key
+    endpoint: "https://<your-logsense-server>/logs",
     service: "auth-service",
     environment: "production",
 });
@@ -90,17 +93,20 @@ const logger = new LogSense(options: LoggerOptions);
 
 | Property | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| **`apiKey`** (Required) | `string` | — | Access key generated from the LogSense Web Dashboard. |
-| **`service`** | `string` | `"node-service"` | Name of the microservice (e.g. `auth-service`, `payment-gateway`). |
-| **`environment`** | `string` | `"development"` | Application environment scope (e.g. `development`, `staging`, `production`). |
-| **`endpoint`** | `string` | `"http://localhost:5000/api/logs"` | Target URL of the LogSense server ingestion API endpoint. |
-| **`batchSize`** | `number` | `50` | Maximum number of log lines bundled together into a single HTTP post batch. |
-| **`flushInterval`** | `number` | `2000` | Buffer flush frequency in milliseconds. |
-| **`maxQueueSize`** | `number` | `10000` | Maximum capacity of the local log queue before dropping new items. |
-| **`compress`** | `boolean` | `false` | Whether to compress payload data before transport. |
-| **`timeout`** | `number` | `5000` | Network request timeout for sending logs. |
-| **`silent`** | `boolean` | `false` | If set to `true`, disables console mirroring of logs. |
-| **`captureUnhandled`** | `boolean` | `true` | When `true`, automatically logs uncaught exceptions and unhandled promise rejections. |
+| **`apiKey`** (Required) | `string` | — | Project API key generated in the LogSense web dashboard. Sent as the `x-api-key` header. |
+| **`service`** | `string` | `""` | Name of the service (e.g. `auth-service`). Omitted from log entries if empty. |
+| **`environment`** | `string` | `""` | Environment scope (e.g. `development`, `staging`, `production`). Omitted if empty. |
+| **`endpoint`** | `string` | `"http://localhost:5000/logs"` | URL of the LogSense server ingestion endpoint (`POST /logs`). Set this to your deployed server. |
+| **`batchSize`** | `number` | `100` | Maximum number of log entries per HTTP batch. |
+| **`flushInterval`** | `number` | `5000` | Buffer flush interval in milliseconds. |
+| **`maxQueueSize`** | `number` | `10000` | Maximum capacity of the local queue before new items are dropped. |
+| **`compress`** | `boolean` | `false` | gzip-compress batches before sending. |
+| **`timeout`** | `number` | `5000` | HTTP request timeout in milliseconds. |
+| **`customHeaders`** | `Record<string, string>` | `{}` | Extra headers added to every ingestion request. |
+| **`silent`** | `boolean` | `false` | If `true`, disables console mirroring of logs. |
+| **`captureUnhandled`** | `boolean` | `false` | If `true`, logs uncaught exceptions and unhandled promise rejections. |
+
+Defaults are defined in `src/config.ts`.
 
 ---
 
@@ -153,7 +159,7 @@ When using `logsenseMiddleware`, a specialized child logger is attached to the r
 app.get("/orders", (req, res) => {
     req.log.info("User requested orders catalog list"); 
     // Console Output:
-    // [LogSense] [2026-06-30T15:00:00Z] [INFO] User requested orders catalog list {"requestId":"...","traceId":"...","method":"GET","url":"/orders"}
+    // Metadata automatically includes requestId, method and url
 });
 ```
 
@@ -164,6 +170,36 @@ app.get("/orders", (req, res) => {
 To prevent log loss when a service restarts or terminates, the SDK automatically registers handlers to flush buffers. If you need to manually handle exit routines, you can call `.shutdown()`:
 
 ```typescript
-// Flush any queued logs and close transport channels
+// Flush any queued logs and stop the batch manager (close() is an alias)
 await logger.shutdown();
+
+// Or flush without shutting down
+await logger.flush();
+```
+
+---
+
+## 🧑‍💻 Development
+
+```bash
+npm install
+npm run build   # tsup → dist/ (CJS, ESM and type declarations)
+npm run dev     # tsup --watch
+```
+
+`example.ts` is a local verification script that exercises log levels, context, child loggers, exception capture and the Express middleware against a running server. No test script is defined.
+
+### Source layout
+
+```
+src/
+  index.ts       Public exports
+  logger.ts      LogSense class: levels, context, child loggers, exit handlers, metrics
+  middleware.ts  Express request and error middleware, redaction
+  config.ts      Default options
+  queue.ts       In-memory queue
+  batch.ts       Batch manager (periodic / size-based flush)
+  transport.ts   Axios transport with keep-alive and optional gzip
+  retry.ts       Exponential backoff retries
+  types.ts       LoggerOptions, LogEntry, LogLevel
 ```
